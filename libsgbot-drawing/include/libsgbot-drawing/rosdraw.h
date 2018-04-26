@@ -34,7 +34,7 @@ public:
 
   virtual ~RosDraw()
   {
-    ROS_INFO("reset");
+    ROS_INFO("reset draw callbacks");
     reset();
   }
 

@@ -8,26 +8,16 @@
 
 #include <libsgbot-drawing/rosdraw.h>
 
-sgbot::DrawCallbacks* rosdraw = NULL;
+#include <boost/thread.hpp>
+
 sgbot::slam::hector::HectorMapping* mapping = NULL;
 
-int last_map_update = 0;
+const int publish_map_level = 0;
 
-void initialDrawing()
-{
-  sgbot::draw = new sgbot::Draw();
-  rosdraw = new RosDraw();
-
-  rosdraw->reset();
-
-  sgbot::draw->setCallbacks(rosdraw);
-}
-
-void finishDrawing()
-{
-  delete sgbot::draw;
-  delete rosdraw;
-}
+ros::Publisher pose_publisher;
+ros::Publisher pose_update_publisher;
+ros::Publisher map_publisher;
+ros::Publisher map_meta_publisher;
 
 geometry_msgs::PoseWithCovarianceStamped getPoseWithCovariance(const sgbot::Pose2D& pose, const sgbot::la::Matrix<float, 3, 3>& cov, const ros::Time& stamp, const std::string frame_id)
 {
@@ -53,6 +43,24 @@ geometry_msgs::PoseWithCovarianceStamped getPoseWithCovariance(const sgbot::Pose
 
   return result;
 }
+
+geometry_msgs::PoseStamped getPose(const sgbot::Pose2D& pose, const ros::Time& stamp, const std::string frame_id)
+{
+  geometry_msgs::PoseStamped result;
+
+  result.header.stamp = stamp;
+  result.header.frame_id = frame_id;
+
+  result.pose.position.x = pose.x();
+  result.pose.position.y = pose.y();
+  result.pose.orientation.w = cos(pose.theta() * 0.5f);
+  result.pose.orientation.z = sin(pose.theta() * 0.5f);
+
+  //printf("%f, %f, %f\n", pose.x(), pose.y(), pose.theta());
+
+  return result;
+}
+
 
 nav_msgs::GetMap::Response getMap(sgbot::Map2D& map2d, const ros::Time& stamp, const std::string frame_id)
 {
@@ -86,6 +94,34 @@ nav_msgs::GetMap::Response getMap(sgbot::Map2D& map2d, const ros::Time& stamp, c
   return map;
 }
 
+void publishLoop()
+{
+  ros::Rate r(5.0);
+  int publish_times = 0;
+  while(ros::ok())
+  {
+    if(mapping->hasUpdatedMap(publish_map_level))
+    {
+      sgbot::Map2D map2d = mapping->getMap(publish_map_level);
+      nav_msgs::GetMap::Response map_rep = getMap(map2d, ros::Time::now(), "hector_map");
+      
+      if(publish_times == 0)
+      {
+        map_meta_publisher.publish(map_rep.map.info);
+      }
+
+      map_publisher.publish(map_rep.map);
+
+      publish_times++;
+    }
+
+    pose_publisher.publish(getPose(mapping->getPose(), ros::Time::now(), "hector_pose"));
+    pose_update_publisher.publish(getPoseWithCovariance(mapping->getPose(), mapping->getPoseCovariance(), ros::Time::now(), "hector_update_pose"));
+
+    r.sleep();
+  }
+}
+
 void scanCallback(const sensor_msgs::LaserScan& scan)
 {
   ros::WallTime start_time = ros::WallTime::now();
@@ -113,22 +149,34 @@ void scanCallback(const sensor_msgs::LaserScan& scan)
   }
 
   mapping->updateByScan(laser);
+
+  assert(0);
 }
 
 int main(int argc, char** argv)
 {
-  initialDrawing();
+  ros::init(argc, argv, "libsgbot_hector_node");
+
+  ros::NodeHandle node;
+
+  sgbot::DrawCallbacks* rosdraw = new RosDraw(node);
+  rosdraw->reset();
+  sgbot::draw.setCallbacks(rosdraw);
 
   mapping = new sgbot::slam::hector::HectorMapping();
 
   // init ros node
-  ros::init(argc, argv, "libsgbot_hector_node");
-  ros::NodeHandle node;
   ros::Subscriber scan_sub = node.subscribe("scan", 5, &scanCallback);
+  pose_publisher = node.advertise<geometry_msgs::PoseStamped>("hector_pose", 1, false);
+  pose_update_publisher = node.advertise<geometry_msgs::PoseWithCovarianceStamped>("hector_update_pose", 1, false);
+  map_publisher = node.advertise<nav_msgs::OccupancyGrid>("hector_map", 1, true);;
+  map_meta_publisher = node.advertise<nav_msgs::MapMetaData>("hector_map_meta", 1, true);
+
+  boost::thread publish_thread = boost::thread(boost::bind(&publishLoop));
 
   ros::spin();
 
-  finishDrawing();
+  delete rosdraw;
 
   return 0;
 }
