@@ -149,8 +149,6 @@ void scanCallback(const sensor_msgs::LaserScan& scan)
   }
 
   mapping->updateByScan(laser);
-
-  assert(0);
 }
 
 int main(int argc, char** argv)
