@@ -5,6 +5,9 @@
 #include <ros/init.h>
 #include <laser_geometry/laser_geometry.h>
 #include <nav_msgs/GetMap.h>
+#include "tf/transform_listener.h"
+#include "tf/transform_broadcaster.h"
+#include "tf/message_filter.h"
 
 #include <libsgbot-drawing/rosdraw.h>
 
@@ -18,6 +21,11 @@ ros::Publisher pose_publisher;
 ros::Publisher pose_update_publisher;
 ros::Publisher map_publisher;
 ros::Publisher map_meta_publisher;
+
+tf::Transform map_to_odom;
+tf::TransformBroadcaster* tf_b;
+
+int publish_times = 0;
 
 geometry_msgs::PoseWithCovarianceStamped getPoseWithCovariance(const sgbot::Pose2D& pose, const sgbot::la::Matrix<float, 3, 3>& cov, const ros::Time& stamp, const std::string frame_id)
 {
@@ -56,7 +64,8 @@ geometry_msgs::PoseStamped getPose(const sgbot::Pose2D& pose, const ros::Time& s
   result.pose.orientation.w = cos(pose.theta() * 0.5f);
   result.pose.orientation.z = sin(pose.theta() * 0.5f);
 
-  //printf("%f, %f, %f\n", pose.x(), pose.y(), pose.theta());
+  printf("pose: %f, %f, %f\n", pose.x(), pose.y(), pose.theta());
+  tf::poseMsgToTF(result.pose, map_to_odom);
 
   return result;
 }
@@ -66,7 +75,9 @@ nav_msgs::GetMap::Response getMap(sgbot::Map2D& map2d, const ros::Time& stamp, c
 {
   nav_msgs::GetMap::Response map;
   // TODO: set origin
-
+  map.map.info.origin.position.x = map2d.getOrigin().x();
+  map.map.info.origin.position.y = map2d.getOrigin().y();
+  map.map.info.origin.orientation.w = 1.0;
   map.map.info.resolution = map2d.getResolution();
   map.map.info.width = map2d.getWidth();
   map.map.info.height = map2d.getHeight();
@@ -88,38 +99,11 @@ nav_msgs::GetMap::Response getMap(sgbot::Map2D& map2d, const ros::Time& stamp, c
       {
         val = 100;
       }
+      map.map.data[x * map.map.info.width + y] = val;
     }
   }
 
   return map;
-}
-
-void publishLoop()
-{
-  ros::Rate r(5.0);
-  int publish_times = 0;
-  while(ros::ok())
-  {
-    if(mapping->hasUpdatedMap(publish_map_level))
-    {
-      sgbot::Map2D map2d = mapping->getMap(publish_map_level);
-      nav_msgs::GetMap::Response map_rep = getMap(map2d, ros::Time::now(), "hector_map");
-      
-      if(publish_times == 0)
-      {
-        map_meta_publisher.publish(map_rep.map.info);
-      }
-
-      map_publisher.publish(map_rep.map);
-
-      publish_times++;
-    }
-
-    pose_publisher.publish(getPose(mapping->getPose(), ros::Time::now(), "hector_pose"));
-    pose_update_publisher.publish(getPoseWithCovariance(mapping->getPose(), mapping->getPoseCovariance(), ros::Time::now(), "hector_update_pose"));
-
-    r.sleep();
-  }
 }
 
 void scanCallback(const sensor_msgs::LaserScan& scan)
@@ -149,6 +133,29 @@ void scanCallback(const sensor_msgs::LaserScan& scan)
   }
 
   mapping->updateByScan(laser);
+
+  ros::WallTime end_time = ros::WallTime::now();
+
+  //std::cout << "proc time: " << end_time - start_time << std::endl;
+
+  if(mapping->hasUpdatedMap(publish_map_level))
+  {
+    sgbot::Map2D map2d = mapping->getMap(publish_map_level);
+    nav_msgs::GetMap::Response map_rep = getMap(map2d, ros::Time::now(), "map");
+
+    if(publish_times == 0)
+    {
+      map_meta_publisher.publish(map_rep.map.info);
+    }
+
+    map_publisher.publish(map_rep.map);
+
+    publish_times++;
+  }
+
+  pose_publisher.publish(getPose(mapping->getPose(), ros::Time::now(), "slam_out_pose"));
+  //pose_update_publisher.publish(getPoseWithCovariance(mapping->getPose(), mapping->getPoseCovariance(), ros::Time::now(), "hector_update_pose"));
+  tf_b->sendTransform(tf::StampedTransform(map_to_odom, ros::Time::now(), "map", "base_footprint"));
 }
 
 int main(int argc, char** argv)
@@ -164,17 +171,23 @@ int main(int argc, char** argv)
   mapping = new sgbot::slam::hector::HectorMapping();
 
   // init ros node
-  ros::Subscriber scan_sub = node.subscribe("scan", 5, &scanCallback);
-  pose_publisher = node.advertise<geometry_msgs::PoseStamped>("hector_pose", 1, false);
-  pose_update_publisher = node.advertise<geometry_msgs::PoseWithCovarianceStamped>("hector_update_pose", 1, false);
-  map_publisher = node.advertise<nav_msgs::OccupancyGrid>("hector_map", 1, true);;
-  map_meta_publisher = node.advertise<nav_msgs::MapMetaData>("hector_map_meta", 1, true);
+  ros::Subscriber scan_sub = node.subscribe("scan", 1, &scanCallback);
+  pose_publisher = node.advertise<geometry_msgs::PoseStamped>("slam_out_pose", 1, false);
+  pose_update_publisher = node.advertise<geometry_msgs::PoseWithCovarianceStamped>("update_pose", 1, false);
+  map_publisher = node.advertise<nav_msgs::OccupancyGrid>("map", 1, true);;
+  map_meta_publisher = node.advertise<nav_msgs::MapMetaData>("map_meta", 1, true);
 
-  boost::thread publish_thread = boost::thread(boost::bind(&publishLoop));
+  tf_b = new tf::TransformBroadcaster();
+  ROS_ASSERT(tf_b);
+
+  map_to_odom.setIdentity();
 
   ros::spin();
 
   delete rosdraw;
+
+  if (tf_b)
+    delete tf_b;
 
   return 0;
 }
